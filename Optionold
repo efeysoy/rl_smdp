@@ -1,0 +1,151 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+
+public class Option
+{
+    public SubGoal m_subgoal;
+    public InitiationSet m_initSet;
+    public Dictionary<int, double> V;
+    Agent m_agent;
+    public int id = 0;
+
+    static int idcounter = 0;
+
+    public Option(SubGoal subgoal, InitiationSet initiationSet, Agent agent)
+    {
+        idcounter++;
+        id = idcounter;
+        m_initSet = initiationSet;
+        m_subgoal = subgoal;
+        m_agent = agent;
+        V = new Dictionary<int, double>();
+        for (int i = 0; i < initiationSet.States.Count; i++)
+        {
+            V.Add(initiationSet.States[i].State, 0);
+        }
+    }
+
+    public void Execute(int s, ref int sP, ref int steps)
+    {
+        sP = s;
+        double r_temp = 0;
+        steps--;
+        while (sP != m_subgoal.State)
+        {
+            int[] temp = maxA(sP);
+            if (temp[0] == -1)
+                throw new Exception();
+            //sP = temp[0];
+            bool contextChanged = m_agent.executeAction(sP, temp[1], ref sP, ref r_temp, ref steps);
+            if (contextChanged || temp[0] != sP)
+                break;
+            steps++;
+        }
+        steps++;
+    }
+
+    public void Learn()
+    {
+        double delta = 0;
+        double theta = 0.5;
+        double gamma = 0.7;
+        V[m_subgoal.State] = 20;
+        do
+        {
+            delta = 0;
+            for (int i = 0; i < V.Count; i++)
+            {
+                int s = m_initSet.States[i].State;
+                double v = V[s];
+                int[] temp = maxA(s);
+                if (temp[0] < 0)
+                    continue;
+                double reward = 0;
+                if (temp[0] == m_subgoal.State)
+                    reward = 10;
+                V[s] = reward + gamma * V[temp[0]];
+                delta = delta >= Math.Abs(v - V[s]) ? delta : Math.Abs(v - V[s]);
+            }
+        } while (delta > theta);
+
+
+    }
+
+    public int[] maxA(int state)
+    {
+        
+        int s = stateToIndex(state);
+        List<int> tempStates = new List<int>();
+
+        for (int i = 0; i < m_initSet.States[s].Count; i++)
+        {
+            if ( m_initSet.States[s][i] != null && m_initSet.States[s][i].steps == 1 && V.ContainsKey(m_initSet.States[s][i].sP))
+            {
+                if (m_initSet.States[s][i].sP == m_subgoal.State)
+                    return new int[] { m_initSet.States[s][i].sP, i };
+                if (tempStates.Count <= 0)
+                {
+                    tempStates.Add(i);
+                    continue;
+                }
+                if (V[m_initSet.States[s][tempStates[0]].sP] < V[m_initSet.States[s][i].sP])
+                {
+                    tempStates.Clear();
+                    tempStates.Add(i);
+                }
+                else if (V[m_initSet.States[s][tempStates[0]].sP] == V[m_initSet.States[s][i].sP])
+                {
+                    tempStates.Add(i);
+                }
+            }
+        }
+        if (tempStates.Count <= 0)
+            return new int[] { -1, -1 };
+
+        int a = tempStates[m_agent.rand.Next(tempStates.Count)];
+        return new int[] { m_initSet.States[s][a].sP, a };
+    }
+
+    double e = 0.1;
+    public int[] e_greedy(int state)
+    {
+        if (m_agent.rand.NextDouble() > e)
+            return maxA(state);
+        int s = stateToIndex(state);
+        List<int> tempStates = new List<int>();
+
+        for (int i = 0; i < m_initSet.States[s].Count; i++)
+        {
+            if (m_initSet.States[s][i] != null && m_initSet.States[s][i].steps == 1 && V.ContainsKey(m_initSet.States[s][i].sP))
+            {
+                tempStates.Add(i);
+            }
+        }
+
+        if (tempStates.Count <= 0)
+            return new int[] { -1, -1 };
+
+        int a = tempStates[m_agent.rand.Next(tempStates.Count)];
+        return new int[] { m_initSet.States[s][a].sP, a };
+    }
+
+
+
+    public int stateToIndex(int state)
+    {
+        for (int i = 0; i < m_initSet.States.Count; i++)
+        {
+            if (m_initSet.States[i].State == state)
+                return i;
+        }
+        return -1;
+    }
+
+    public override string ToString()
+    {
+        return "Option " + id + " to state " + m_subgoal.State;
+    }
+}
+

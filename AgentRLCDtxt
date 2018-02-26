@@ -1,0 +1,925 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+
+
+
+public class Agent
+{
+    public bool oneStepLearn = false;
+    private bool m_DisableOptions;
+    public Random rand = new Random(212);
+    public Environment environment;
+    public List<int> EpisodeSteps = new List<int>();
+    public static double Emin = -0.000001; //RLCD
+    public static double rho = 0.075; //adjustment coefficiant
+    
+    public QClass Q;
+    public int currentState;
+    public ModelClass Model = new ModelClass();
+    double e = 0.1;
+    bool m_optsLearned = false;
+    List<SubGoal> Subgoals = new List<SubGoal>();
+    List<int> SubgoalCounts = new List<int>();
+    public int[] initiationSetMembers = null;
+    public List<InitiationSet> initiationSets = new List<InitiationSet>();
+
+    public Context currentContext;
+    public List<Context> contexts = new List<Context>();
+
+    List<double[]> e_updates;
+    int discount = 0;
+    
+
+
+
+
+    public Agent(int startState, Environment env)
+    {
+        environment = env;
+        currentState = 0; //env.CurrentState olacak!!!!!!!!!!!!!!!!!!
+        Q = new QClass(this, m_DisableOptions);
+        currentContext = Context.NewContext(this, DisableOptions, currentState);
+        contexts.Add(currentContext);
+        SwitchContext(currentContext);
+    }
+
+    public bool DisableOptions
+    {
+        get
+        {
+            return m_DisableOptions;
+        }
+        set
+        {
+            m_DisableOptions = value;
+            Q = new QClass(this, m_DisableOptions);
+        }
+    }
+
+    public void SwitchContext(Context x)
+    {
+        //currentContext.currentState = currentState;
+        currentContext.e = e;
+        currentContext.initiationSetMembers = initiationSetMembers;
+        currentContext.initiationSets = initiationSets;
+        currentContext.m_optsLearned = m_optsLearned;
+        currentContext.Model = Model;
+        currentContext.Q = Q;
+        currentContext.SubgoalCounts = SubgoalCounts;
+        currentContext.Subgoals = Subgoals;
+
+        //currentState = x.currentState;
+        e = x.e;
+        initiationSetMembers = x.initiationSetMembers;
+        initiationSets = x.initiationSets;
+        m_optsLearned = x.m_optsLearned;
+        Model = x.Model;
+        Q = x.Q;
+        SubgoalCounts = x.SubgoalCounts;
+        Subgoals = x.Subgoals;
+
+        currentContext = x;
+    }
+
+    
+    public void LearnPS(int N, int episodes)
+    {
+        e_updates = new List<double[]>();
+        int stateHold = currentState;
+
+        float alpha = 0.2f, gamma = 0.95f, theta = 0.001f;
+        int s = currentState; //Initialize
+
+        List<PriorityObj> PQueue = new List<PriorityObj>();
+
+        int steps = 0;
+        while (true)
+        {
+            int tempSteps = steps++; //Number of steps per episode
+
+            //(b) a <- policy(s,Q)
+            int a = e_greedy(Q[s]);
+            //tempFirstVisitHist[s[0], s[1]] += 1;
+            //(c) Execute action a  
+            int sP = 0;
+            double r = 0;
+
+            executeAction(Q[s], a, ref sP, ref r, ref steps);
+            int result = sP;
+
+
+            //(d) Model(s,a) <- s', r
+            //Model[s[0], s[1], a] = new int[] { sP[0], sP[1], r, steps - tempSteps };
+
+
+            int maxC = 0;
+
+            double em = 0;
+            if(contexts[0].Model[s,a] != null)
+                em = contexts[0].Model[s, a].calculateEm(sP, r);
+            //if (em < 0)
+            //    em = em;
+            contexts[0].Em = contexts[0].Em + Agent.rho * (em - contexts[0].Em);
+            double maxE = contexts[0].Em;
+
+
+            for (int c = 1; c < contexts.Count; c++)
+            {
+                if (contexts[c].Model[s, a] == null)
+                    em = 0;
+                else
+                    em = contexts[c].Model[s, a].calculateEm(sP, r);
+                contexts[c].Em = contexts[c].Em + Agent.rho * (em - contexts[c].Em);
+
+                if (maxE < contexts[c].Em)
+                {
+                    maxE = contexts[c].Em;
+                    maxC = c;
+                }
+            }
+            if (maxE < Emin)
+            {
+                Context ctx = Context.NewContext(this, DisableOptions, currentState);
+                contexts.Add(ctx);
+                SwitchContext(ctx);
+            }
+            else
+            {
+                if (contexts[maxC] != currentContext)
+                    SwitchContext(contexts[maxC]);
+            }
+
+            
+            if (Model[s, a] == null)
+            {
+                ModelValue m = new ModelValue(s, a, sP, r, steps - tempSteps);
+                Model[s, a] = m;
+            }
+            else
+                Model[s, a].Update(s, a, sP, r, steps - tempSteps);
+            
+            //System.Diagnostics.Debug.WriteLine("\tContext: " + currentContext.cID + "\t(s,a,sp): " + s + ", " + a + ", " + sP + "\tTm0: " /*+ (Model[s, a].Tm.Count > 0 ? Model[s,a].Tm[0].ToString() : " ") */ + "\tem0: " + em + "\tEm0: " + contexts[0].Em + "\tEm1: " + (contexts.Count > 1 ? contexts[1].Em.ToString() : "-"));
+            
+            //(e) p <- |r + gama*maxA'Q(s',a') - Q(s,a)|
+            //float p = Math.Abs(r + gamma * getQ(sP[0], sP[1], maxA(sP)) - getQ(s[0], s[1], a));
+            double p = Math.Abs(r + gamma * Q[sP][Q[sP].GetMaxAction()] - Q[s][a]);
+
+            //(f) if p > tetha, then insert s,a into PQueue with priority p
+            PQueue.Clear();
+            if (p > theta)
+                InsertQueue(PQueue, s, a, p);
+
+            //(g) Repeat N times while PQueue is not empty
+            for (int i = 0; i < N && 0 < PQueue.Count; i++)
+            {
+                //(-)s, a <- first(PQueue)
+                PriorityObj obj = PQueue[0];// dene!!!!!!!!!!!!11
+                PQueue.Remove(obj);
+                s = obj.State;
+                a = obj.Action;
+
+                //(-)s', r <- Modell(s,a)
+                sP = Model[s, a].sP;
+                r = Model[s, a].reward;
+                int tsteps = Model[s, a].steps;
+
+                //(-)Q(s, a) <- Q(s,a) + alpha[r + gama*maxA'Q(s',a') - Q(s,a)]
+                e_updates.Add(new double[] { s, a, Q[s][a] });
+                Q[s][a] = Q[s][a] + alpha * (r + Math.Pow(gamma, tsteps) * Q[sP][Q[sP].GetMaxAction()] - Q[s][a]);
+
+                //float t = (float)(getQ(s[0], s[1], a) + alpha * (r + Math.Pow(gamma, tsteps) * getQ(sP[0], sP[1], maxA(sP)) - getQ(s[0], s[1], a)));
+                //setQ(s[0], s[1], a, t);
+
+                //(-)Repeat, for all s",a" predicted to lead to s
+                List<ModelValue> list = Model.All_SA_PredictedToLeadTo(s);
+                for (int j = 0; j < list.Count; j++)
+                {
+                    int sDP = list[j].s;
+                    int aDP = list[j].a;
+
+                    // r" <- predicted reward
+                    double rDP = list[j].reward;
+
+                    // p <- |r" + gamma*maxaQ(s,a) - Q(s",a")|
+                    p = Math.Abs(rDP + gamma * Q[s][Q[s].GetMaxAction()] - Q[sDP][aDP]);
+
+                    // if p > tetha, then insert s",a" into PQueue with priority p
+                    if (p > theta)
+                    {
+                        InsertQueue(PQueue, sDP, aDP, p);
+                    }
+                }
+
+            }
+            s = result;
+            environment.State = s;
+            if (steps % 1000 == 0)
+                e = 0.35 * Math.Pow(Math.E, -(discount++) / 20.0);
+            e = e < 0.02 ? 0.02 : e;
+            if (environment.isGoal(s))
+            {
+                //if (subgoalValues != null)
+                //{
+                //    subgoalValues[s] = 0.1;
+                //    for (int f = 0; f < 4; f++)
+                //    {
+                //        if (Model.StateCount < s)
+                //            Model.States.Add(new ModelState(s));
+                //        if (Model[s] == null)
+                //            Model[s] = new ModelState(s);
+                //        if(Model[s].Count <= 4)
+                //            Model[s].Add(new ModelValue(s, f, s, 0, 0));
+                //    }
+                //}
+                if (Model.States.Count <= s)
+                {
+                    Model[s, a] = null;
+                    Model.States[s] = new ModelState(s);
+                }
+                //e = 0.9 * Math.Pow(Math.E, -(discount++) / 50.0); //Update epsilon
+                if (!DisableOptions && !m_optsLearned)
+                {
+                    initiationSetMembers = new int[Model.StateCount];
+                    initiationSets = new List<InitiationSet>();
+                    Subgoals = SearchSubgoals();
+                    //Subgoals.Add(new SubGoal(s));
+                    SubgoalCounts.Add(Subgoals.Count);
+                    double mean = 0;
+                    double std = 100;
+                    if (SubgoalCounts.Count > 5)
+                    {
+                        std = 0;
+                        for (int c = SubgoalCounts.Count - 5; c < SubgoalCounts.Count; c++)
+                        {
+                            mean += SubgoalCounts[c] / 5d;
+                        }
+                        for (int c = SubgoalCounts.Count - 5; c < SubgoalCounts.Count; c++)
+                        {
+                            std += Math.Pow(SubgoalCounts[c] - mean, 2) / 5;
+                        }
+                        std = Math.Sqrt(std);
+
+                    }
+
+
+
+                    if (std < 0.1)
+                    {
+                        SearchInitiationSets(Subgoals); //Bu satır if in içinde olmalı
+                        List<Option> options = CreateOptions();
+                        OptionLearn(options);
+                    }
+                }
+
+                s = currentState;
+                EpisodeSteps.Add(steps);
+                steps = 0;
+                int calcLength = 9;
+                if (EpisodeSteps.Count > calcLength)
+                {
+                    double mean = 0;
+                    double std = 0;
+                    for (int c = EpisodeSteps.Count - calcLength; c < EpisodeSteps.Count; c++)
+                    {
+                        mean += EpisodeSteps[c] / (double)calcLength;
+                    }
+                    for (int c = EpisodeSteps.Count - calcLength; c < EpisodeSteps.Count; c++)
+                    {
+                        std += Math.Pow(EpisodeSteps[c] - mean, 2) / calcLength;
+                    }
+                    std = Math.Sqrt(std);
+                    if (std < 3)
+                        break;
+                }//Varyans ile dene
+
+                //if (!m_optsLearned)
+                //{
+                //    OptionSearch();
+                //    OptionLearn();
+                //}
+                PQueue.Clear();
+                if (oneStepLearn)
+                    break;
+                e_updates = new List<double[]>();
+            }
+        }
+        environment.State = currentState;
+    }
+
+    void OptionLearn(List<Option> Options)
+    {
+        {
+            m_optsLearned = true;
+            for (int i = 0; i < Options.Count; i++)
+            {
+                Options[i].Learn();
+            }
+            //for (int i = 0; i < Qoptions.GetLength(0); i++)
+            //{
+            //    for (int j = 0; j < Qoptions.GetLength(1); j++)
+            //    {
+            //        Qoptions[i, j] = StateOptions(i, j);
+            //    }
+            //}
+        }
+    }
+
+    void SearchInitiationSets(List<SubGoal> subgoals)
+    {
+        int initSetID = 1;
+        for (int i = 0; i < subgoals.Count; i++)
+        {
+            initiationSetMembers[subgoals[i].State] = -1;
+        }
+
+        for (int i = 0; i < subgoals.Count; i++)
+        {
+            for (int j = 0; j < Model.States[subgoals[i].State].Count; j++)
+            {
+                if (Model[subgoals[i].State, j] == null)
+                    continue;
+                if (initiationSetMembers[Model[subgoals[i].State, j].sP] == 0)
+                {
+
+                    if (Model[Model[subgoals[i].State, j].sP].LeadsTo(subgoals[i].State))
+                    {
+                        InitiationSet iSet = new InitiationSet();
+                        iSet.ID = initSetID;
+                        _SearchInitiationSets(Model[subgoals[i].State, j].sP, iSet);
+
+                        if (iSet.States.Count > 0)
+                        {
+                            //iSet.States.Add(Model[subgoals[i].State]);
+                            //iSet.Subgoals.Add(subgoals[i]);
+                            initiationSets.Add(iSet);
+                        }
+
+                        initSetID++;
+                    }
+                }
+            }
+        }
+    }
+
+    void _SearchInitiationSets(int state, InitiationSet initSet)
+    {
+        int initSetID = initSet.ID;
+        ModelState m_s = new ModelState(state);
+        initSet.States.Add(m_s);
+        int n = initSet.States.Count - 1;
+        initiationSetMembers[state] = initSetID;
+        for (int j = 0; j < Model.States[state].Count; j++)
+        {
+            if (Q[state].Actions[j].O != null)
+                continue;
+            initSet.States[n].Add(Model[state, j]);
+            if (Model[state, j] == null)
+                continue;
+            
+            if (initiationSetMembers[Model[state, j].sP] != initSetID)
+            {
+                if (initiationSetMembers[Model[state, j].sP] == -1 && !initSet.States.Contains(Model[Model[state, j].sP]))
+                {
+                    initSet.States.Add(Model[Model[state, j].sP]);
+                    initSet.Subgoals.Add(getSubgoalFromState(Model[state, j].sP));
+                }
+                if (initiationSetMembers[Model[state, j].sP] != -1)
+                    _SearchInitiationSets(Model[state, j].sP, initSet);
+            }
+        }
+    }
+
+    SubGoal getSubgoalFromState(int state)
+    {
+        for (int i = 0; i < Subgoals.Count; i++)
+        {
+            if (Subgoals[i].State == state)
+                return Subgoals[i];
+        }
+        throw new Exception("Subgoal error!");
+        return null;
+    }
+
+    List<Option> CreateOptions()
+    {
+        List<Option> options = new List<Option>();
+        for(int i = 0; i < initiationSets.Count; i++)
+        {
+            for (int j = 0; j < initiationSets[i].Subgoals.Count; j++)
+            {
+                Option opt = new Option(initiationSets[i].Subgoals[j], initiationSets[i], this);
+                options.Add(opt);
+                for (int s = 0; s < initiationSets[i].States.Count; s++)
+                {
+                    Q[initiationSets[i].States[s].State].Actions.Add(new Action(opt));
+                }
+            }
+        }
+        return options;
+    }
+
+    public bool isSubgoal(int state)
+    {
+        for (int i = 0; i < Subgoals.Count; i++)
+        {
+            if (Subgoals[i].State == state)
+                return true;
+        }
+        return false;
+    }
+
+    public double[] subgoalValues;
+    public double[] subgoalValues2;
+    public double[] bcValues;
+    List<SubGoal> SearchSubgoals()
+    {
+        List<SubGoal> result = new List<SubGoal>();
+        subgoalValues = new double[Model.States.Count];
+        subgoalValues2 = new double[Model.States.Count];
+        bcValues = new double[Model.States.Count];
+        int depth = 3;
+        for (int i = 0; i < Model.States.Count; i++)
+        {
+            if (Model.States[i] == null)
+                continue;
+            List<int> nodes = new List<int>();
+            nodes.Add(i);
+            for (int j = 0; j < Model.States[i].Count; j++) //Her yönde depth derinliğinde node-ları buluyor
+            {
+                if (Model.States[i][j] == null) continue;
+                search(Model[i,j].sP, nodes, depth);
+            }
+            //betweenness centrality
+            //double total = 0;
+            //for (int u = 1; u < nodes.Count; u++)
+            //{
+            //    for (int t = 1; t < nodes.Count; t++)
+            //    {
+            //        if (u == t)
+            //            continue;
+            //        min = -1;
+            //        int sigma = 0;
+            //        int sigmaV = 0;
+            //        b_cent_search(nodes.ToArray(), u, t, 0, ref sigma, ref sigmaV, 0, false);
+            //        if (sigma > 0 || sigmaV > 0)
+            //            total += sigmaV / (double)(sigma + sigmaV);
+            //    }
+            //}
+           
+            //subgoalValues[i] = total;
+
+            ////betweenness centrality (tree)
+            double total = 0;
+            //for (int u = 1; u < nodes.Count; u++)
+            //{
+            //    for (int t = 1; t < nodes.Count; t++)
+            //    {
+            //        if (u == t)
+            //            continue;
+            //        int sigma = 0;
+            //        int sigmaV = 0;
+            //        Betweenness(nodes, nodes[u], nodes[t], nodes[0], ref sigma, ref sigmaV);
+            //        if (sigma > 0 || sigmaV > 0)
+            //            total += sigmaV / (double)(sigma + sigmaV);
+            //    }
+            //}
+
+            //subgoalValues[i] = total;
+
+            /////////////////////////Deneme
+            nodes.RemoveAt(0);
+            total = nodes.Count;
+            double a = 0;
+            while (nodes.Count > 0)
+            {
+                double temp = 0;
+                search2(nodes[0], nodes, ref temp);
+                a += Math.Pow(temp, 2);
+            }
+            subgoalValues[i] = 1 - (a / Math.Pow(total, 2));
+            ////////////////////////////////
+
+
+
+
+        }
+        //subgoalValues = BrandesBetweenness2();
+
+
+        ///////////////////////visit sayıları
+        for (int i = 0; i < Model.StateCount; i++)
+        {
+            if (Model[i] == null)
+                continue;
+            int total = 0;
+            for (int a = 0; a < Model[i].Count; a++)
+            {
+                if (Model[i][a] == null)
+                    continue;
+                total += Model[i][a].count;
+            }
+            subgoalValues2[i] = total;
+            
+        }
+
+        for (int i = 0; i < Model.StateCount; i++)
+        {
+            if (Model[i] == null)
+                continue;
+            double total = 0;
+            double min = subgoalValues2[i];
+            double max = subgoalValues2[i];
+            for (int a = 0; a < Model[i].Count; a++)
+            {
+                if (Model[i][a] == null)
+                    continue;
+                total += subgoalValues2[Model[i][a].sP];
+                if (subgoalValues2[Model[i][a].sP] < min)
+                    min = subgoalValues2[Model[i][a].sP];
+                if (subgoalValues2[Model[i][a].sP] > max)
+                    max = subgoalValues2[Model[i][a].sP];
+            }
+            total /= 4;
+            subgoalValues[i] = subgoalValues2[i] / total;
+        }
+        ////Visit sayıları ile
+
+        ////normalization
+        //double maxX = subgoalValues.Max();
+        //double minX = subgoalValues.Min();
+        //for (int j = 0; j < subgoalValues.Length; j++)
+        //    subgoalValues[j] = (subgoalValues[j] - minX) / (maxX - minX);
+        //////////// 
+
+        ////////////////declare subgoals by subgoal values
+        for (int N = 0; N < Model.States.Count; N++)
+        {
+            bool isGoal = true;
+            if (Model.States[N] == null)
+                continue;
+            for (int t = 0; t < Model.States[N].Count; t++)
+            {
+                if (Model[N, t] != null && Model[N, t].sP != N && subgoalValues[Model[N, t].sP] >= subgoalValues[N])
+                {
+                    isGoal = false;
+                    break;
+                }
+            }
+
+            if (isGoal)
+                result.Add(new SubGoal(N));
+        }
+        return result;
+    }
+
+
+    double[] BrandesBetweenness2()
+    {
+        double[] Cb = new double[Model.StateCount];
+        Queue<int> Q = new Queue<int>();
+        Stack<int> S = new Stack<int>();
+        int[] dist = new int[Model.StateCount];
+        List<int>[] Pred = new List<int>[Model.StateCount];
+        int[] sig = new int[Model.StateCount];
+        double[] delta = new double[Model.StateCount];
+
+        for (int s = 0; s < Model.StateCount; s++)
+        {
+            if (Model[s] == null) continue;
+
+            //init
+            for (int w = 0; w < Model.StateCount; w++)
+                Pred[w] = new List<int>();
+            for (int t = 0; t < Model.StateCount; t++)
+            {
+                dist[t] = int.MaxValue;
+                sig[t] = 0;
+            }
+            dist[s] = 0;
+            sig[s] = 1;
+            Q.Enqueue(s);
+
+            while (Q.Count > 0)
+            {
+                int v = Q.Dequeue();
+                S.Push(v);
+                for (int a = 0; a < Model[v].Count; a++)
+                {
+                    if (Model[v] == null || Model[v][a] == null)
+                        continue;
+                    int w = Model[v][a].sP;
+                    if (dist[w] == int.MaxValue)
+                    {
+                        dist[w] = dist[v] + 1;
+                        Q.Enqueue(w);
+                    }
+
+                    if (dist[w] == dist[v] + 1)
+                    {
+                        sig[w] = sig[w] + sig[v];
+                        Pred[w].Add(v);
+                    }
+                }
+            }
+
+            for (int v = 0; v < Model.StateCount; v++)
+                delta[v] = 0;
+            while (S.Count > 0)
+            {
+                int w = S.Pop();
+                foreach (int v in Pred[w])
+                {
+                    delta[v] = delta[v] + (sig[v] / (double)sig[w]) * (1 + delta[w]);
+                }
+                if (w != s)
+                    Cb[w] = Cb[w] + delta[w];
+            }
+
+        }
+        return Cb;
+    }
+
+    double[] BrandesBetweenness()
+    {
+        double[] Cb = new double[Model.StateCount];
+        for (int s = 0; s < Model.StateCount; s++)
+        {
+            if (Model[s] == null)
+                continue;
+            Stack<int> S = new Stack<int>();
+            List<int> P = new List<int>();
+            int[] sig = new int[Model.StateCount];
+            sig[s] = 1;
+            int[] d = new int[Model.StateCount];
+            for (int i = 0; i < d.Length; i++) 
+                d[i] = -1;
+            d[s] = 0;
+
+            Queue<int> Q = new Queue<int>();
+            Q.Enqueue(s);
+            while (Q.Count > 0)
+            {
+                int v = Q.Dequeue();
+                S.Push(v);
+                for (int a = 0; a < Model[s].Count; a++)
+                {
+                    if (Model[s] == null || Model[s][a] == null)
+                        continue;
+                    int w = Model[s][a].sP;
+                    if (d[w] < 0)
+                    {
+                        Q.Enqueue(w);
+                        d[w] = d[v] + 1;
+                    }
+
+                    if (d[w] == d[v] + 1)
+                    {
+                        sig[w] = sig[w] + sig[v];
+                        P.Add(v);
+                    }
+                }
+            }
+
+            double[] dt = new double[Model.StateCount];
+            while (S.Count > 0)
+            {
+                int w = S.Pop();
+                for (int v = 0; v < P.Count; v++)
+                    dt[v] = dt[v] + (sig[v] / (double)sig[w]) * (1 + dt[w]);
+                if (w != s)
+                    Cb[w] = Cb[w] + dt[w];
+            }
+        }
+        return Cb;
+    }
+
+    void Betweenness(List<int> nodes, int u, int t, int v, ref int sigma, ref int sigmaV)
+    {
+        sigma = 0;
+        sigmaV = 0;
+        TreeNode start = new TreeNode(null, u);
+        Queue<TreeNode> Q = new Queue<TreeNode>();
+        Q.Enqueue(start);
+        bool fin = false;
+        while (Q.Count > 0)
+        {
+            TreeNode s = Q.Dequeue();
+            for (int j = 0; j < Model.States[s.Value].Count; j++)
+            {
+                if(Model[s.Value][j] == null)
+                    continue;
+                int sp = Model[s.Value][j].sP;
+                if (nodes.Contains(sp) && !s.FamilyContains(sp))
+                {
+                    TreeNode temp = new TreeNode(s, sp);
+                    if (sp == v)
+                        temp.v = true;
+                    Q.Enqueue(temp);
+
+                    if (sp == t)
+                        fin = true;
+                }
+            }
+            if (fin)
+                break;
+        }
+
+        if (fin)
+        {
+            while (Q.Count > 0)
+            {
+                TreeNode temp = Q.Dequeue();
+                if (temp.Value == t)
+                {
+                    if (temp.v)
+                    {
+                        sigmaV++;
+                        sigma++;
+                    }
+                    else
+                        sigma++;
+                }
+            }
+        }
+    }
+
+    int min = -1;
+    int b_cent = 0;
+    void b_cent_search(int[] nodes, int u, int t, int v, ref int sigma, ref int sigmaV, int len,bool passV)
+    {
+        if (min > 0 && min < len)
+        {
+            return;
+        }
+
+        if (u == t)
+        {
+            if (min < 0) min = len;
+            if (min > len)
+            {
+                sigma = 0;
+                sigmaV = 0;
+                min = len;
+            }
+
+            if (passV)
+                sigmaV++;
+            else
+                sigma++;
+            return;
+        }
+
+        if (u == v)
+        {
+            passV = true;
+        }
+
+        int[] nnodes = (int[])nodes.Clone();
+        int currentState = nnodes[u];
+        nnodes[u] = -1;
+        for (int i = 0; i < Model.States[currentState].Count; i++)
+        {
+            if (Model[currentState][i] != null && nnodes.Contains(Model[currentState][i].sP))
+            {
+                b_cent_search(nnodes, IndexOf(nnodes, Model[currentState][i].sP), t, v,ref sigma,ref sigmaV, len + 1,passV);
+            }
+        }
+    }
+
+    int IndexOf(int[] array, int value)
+    {
+        for (int i = 0; i < array.Length; i++)
+            if (array[i] == value)
+                return i;
+        return -1;
+    }
+
+    void search2(int state, List<int> nodes, ref double a)
+    {
+        if (!nodes.Contains(state))
+            return;
+        nodes.Remove(state);
+        if (Model.States[state] == null)
+            return;
+        a++;
+        for (int i = 0; i < Model.States[state].Count; i++)
+        {
+            if (Model.States[state][i] == null || Model[state, i].sP == state)
+                continue;
+            search2(Model[state, i].sP, nodes, ref a);
+        }
+    }
+
+    void search(int state, List<int> nodes, int depth)
+    {
+        if (depth <= 0)
+            return;
+        if(!nodes.Contains(state))
+            nodes.Add(state);
+        
+        if (Model.States[state] == null)
+            return;
+        for (int i = 0; i < Model.States[state].Count; i++)
+        {
+            if (Model.States[state][i] == null || Model[state, i].sP == state)
+                continue;
+            search(Model[state, i].sP, nodes, depth - 1);
+        }
+    }
+
+    
+    private int e_greedy(State s)
+    {
+        double val = rand.NextDouble();
+        //Thread.Sleep(500);
+        if (val < e)         //Exploration
+            return s.GetRandomAction(s.GetMaxAction());
+        else
+            return s.GetMaxAction();
+    }
+
+    void InsertQueue(List<PriorityObj> Queue, int s, int a, double p)
+    {
+        for (int i = 0; i < Queue.Count; i++)
+        {
+            if (s == Queue[i].State &&
+                a == Queue[i].Action)
+            {
+                if (Queue[i].Priority > p)
+                    return;
+                else
+                    Queue.Remove(Queue[i]);
+            }
+        }
+        for (int i = 0; i < Queue.Count; i++)
+        {
+            if (Queue[i].Priority < p)
+            {
+                Queue.Insert(i, new PriorityObj(s, a, p));
+                return;
+            }
+        }
+        Queue.Add(new PriorityObj(s, a, p));
+    }
+
+    public void executeAction(State s, int a, ref int sP, ref double r, ref int steps)
+    {
+        if (s.Actions[a].O != null)
+        {
+            s.Actions[a].O.Execute(s, ref sP, ref steps);
+        }
+        else
+        {
+            environment.ExecuteAction(s.StateID, a, ref sP, ref r);
+        }
+    }
+
+//    public Microsoft.Glee.Drawing.Graph ModelToGLEEGraph()
+//    {
+//        Microsoft.Glee.Drawing.Graph gr = new Microsoft.Glee.Drawing.Graph("Test");
+//        for (int i = 0; i < Model.States.Count; i++)
+//        {
+//            if (Model.States[i] == null) continue;
+//            gr.AddNode(i.ToString());
+//        }
+//        for (int i = 0; i < Model.States.Count; i++)
+//        {
+//            if (Model.States[i] == null) continue;
+//            for (int j = 0; j < Model.States[i].Count; j++)
+//            {
+//                if (Model[i, j] != null && Model[i,j].s != Model[i,j].sP)
+//                {
+//                    bool exists = false;
+//                    for (int k = 0; k < gr.Edges.Count; k++)
+//                    {
+//                        if(gr.Edges[k].Source == Model[i, j].sP.ToString() &&
+//                            gr.Edges[k].Target == Model[i, j].s.ToString()){
+//                                gr.Edges[k].Attr.ArrowHeadAtSource = Microsoft.Glee.Drawing.ArrowStyle.Normal;
+//                            exists = true;
+//                            break;
+//                        }
+//                    }
+//                    if(!exists)
+//                        gr.AddEdge(Model[i, j].s.ToString(), Model[i, j].sP.ToString());
+//                }
+//            }
+//        }
+//        return gr;
+//    }
+}
+
+class PriorityObj
+{
+    public int State;
+    public double Priority;
+    public int Action;
+
+    public PriorityObj(int State, int Action, double Priority)
+    {
+        this.State = State;
+        this.Action = Action;
+        this.Priority = Priority;
+    }
+}
